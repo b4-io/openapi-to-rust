@@ -464,7 +464,7 @@ impl CodeGenerator {
             }
         };
 
-        if has_retry || has_tracing {
+        let constructors = if has_retry || has_tracing {
             let retry_arg = has_retry.then(|| quote! { retry_config, });
             let tracing_arg = has_tracing.then(|| quote! { enable_tracing, });
             let default_retry_arg = has_retry.then(|| quote! { None, });
@@ -498,14 +498,7 @@ impl CodeGenerator {
                     #retry_middleware
 
                     let http_client = client_builder.build();
-
-                    Self {
-                        base_url: #default_base_url,
-                        api_key: None,
-                        http_client,
-                        custom_headers: BTreeMap::new(),
-                        max_response_body_bytes: #max_response_body_bytes,
-                    }
+                    Self::with_middleware(http_client)
                 }
             }
         } else {
@@ -517,15 +510,23 @@ impl CodeGenerator {
                 /// Preserves the supplied client's transport settings (for example,
                 /// TLS identity, trusted roots, proxy, timeout, and default headers).
                 pub fn with_client(client: reqwest::Client) -> Self {
-                    let http_client = ClientBuilder::new(client).build();
+                    Self::with_middleware(ClientBuilder::new(client).build())
+                }
+            }
+        };
 
-                    Self {
-                        base_url: #default_base_url,
-                        api_key: None,
-                        http_client,
-                        custom_headers: BTreeMap::new(),
-                        max_response_body_bytes: #max_response_body_bytes,
-                    }
+        quote! {
+            #constructors
+
+            /// Use an application-owned middleware stack without adding retries
+            /// or tracing. The supplied transport retains its connection pool.
+            pub fn with_middleware(http_client: ClientWithMiddleware) -> Self {
+                Self {
+                    base_url: #default_base_url,
+                    api_key: None,
+                    http_client,
+                    custom_headers: BTreeMap::new(),
+                    max_response_body_bytes: #max_response_body_bytes,
                 }
             }
         }
@@ -697,6 +698,7 @@ impl CodeGenerator {
             "with_config",
             "with_client",
             "with_client_and_config",
+            "with_middleware",
             "with_base_url",
             "with_api_key",
             "with_max_response_body_bytes",

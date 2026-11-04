@@ -2653,6 +2653,48 @@ impl CodeGenerator {
         }
     }
 
+    /// Keep write-only values out of diagnostics, including composed and
+    /// referenced property schemas. Traverse references once so recursive models
+    /// cannot make this check loop.
+    fn contains_write_only(
+        schema: &crate::analysis::AnalyzedSchema,
+        analysis: &SchemaAnalysis,
+    ) -> bool {
+        let mut pending = vec![&schema.original];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(value) = pending.pop() {
+            if value.get("writeOnly").and_then(serde_json::Value::as_bool) == Some(true) {
+                return true;
+            }
+            if let Some(target) = value
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/components/schemas/"))
+                && visited.insert(target)
+                && let Some(referenced) = analysis.schemas.get(target)
+            {
+                pending.push(&referenced.original);
+            }
+            if let Some(properties) = value
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                pending.extend(properties.values());
+            }
+            for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+                if let Some(branches) = value.get(keyword).and_then(serde_json::Value::as_array) {
+                    pending.extend(branches);
+                }
+            }
+            for keyword in ["items", "additionalProperties"] {
+                if let Some(child) = value.get(keyword) {
+                    pending.push(child);
+                }
+            }
+        }
+        false
+    }
+
     fn generate_struct(
         &self,
         schema: &crate::analysis::AnalyzedSchema,
@@ -2784,52 +2826,54 @@ impl CodeGenerator {
         // Generate derives with optional Specta support
         // Note: We use snake_case everywhere (matching the OpenAPI spec) for consistency
         // between Rust, JSON API, and TypeScript
+        let redact_debug = Self::contains_write_only(schema, analysis);
+        let debug_derive = (!redact_debug).then(|| quote! { Debug, });
+        let debug_impl = redact_debug.then(|| {
+            quote! {
+                impl std::fmt::Debug for #struct_name {
+                    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        formatter.write_str(concat!(stringify!(#struct_name), "([REDACTED])"))
+                    }
+                }
+            }
+        });
         let derives = match (
             self.config.enable_specta,
             can_derive_default,
             variant.is_some(),
         ) {
             (true, _, true) => quote! {
-                #[derive(Debug, Clone)]
+                #[derive(#debug_derive Clone)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
             },
             (false, _, true) => quote! {
-                #[derive(Debug, Clone)]
+                #[derive(#debug_derive Clone)]
             },
             (true, true, false) => quote! {
-                #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+                #[derive(#debug_derive Clone, Deserialize, Serialize, Default)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
             },
             (true, false, false) => quote! {
-                #[derive(Debug, Clone, Deserialize, Serialize)]
+                #[derive(#debug_derive Clone, Deserialize, Serialize)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
             },
             (false, true, false) => quote! {
-                #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+                #[derive(#debug_derive Clone, Deserialize, Serialize, Default)]
             },
             (false, false, false) => quote! {
-                #[derive(Debug, Clone, Deserialize, Serialize)]
+                #[derive(#debug_derive Clone, Deserialize, Serialize)]
             },
         };
 
-        // `#[serde(untagged)]` takes the first branch that deserializes, so a
-        // branch accepting more than its schema allows claims values that
-        // belong to a later one: with `anyOf: [Closed, {type: object}]` and a
-        // `Closed` whose fields are all optional, `{"other": 1}` matches
-        // `Closed` — which the document forbids — and the key is dropped
-        // instead of reaching the open branch.
-        //
-        // Only a *stated* `additionalProperties: false` earns this. An omitted
-        // keyword leaves the object open in JSON Schema (the generator merely
-        // projects it closed), and tightening those would make every generated
-        // client fail the first time a server adds a field.
+        // Preserve an explicit `additionalProperties: false` on standalone
+        // objects as well as union branches. Omitting the keyword still leaves
+        // an object open in JSON Schema and must not tighten its decoder.
         //
         // Serde rejects `deny_unknown_fields` alongside `flatten` at compile
         // time; `Denied` emits no catch-all field, and a flattened variant is
         // excluded here as well.
-        let denies_unknown_fields = variant.is_none()
-            && additional_properties.denies_unknown_keys()
-            && analysis.untagged_union_branches.contains(&schema.name);
+        let denies_unknown_fields =
+            variant.is_none() && additional_properties.denies_unknown_keys();
         let deny_unknown_fields = if denies_unknown_fields {
             quote! { #[serde(deny_unknown_fields)] }
         } else {
@@ -3027,6 +3071,7 @@ impl CodeGenerator {
                 #(#fields)*
             }
 
+            #debug_impl
             #shared_variant_serde
             #builder
         })
@@ -4581,12 +4626,16 @@ impl CodeGenerator {
             // missing-field → None handling for Option fields
             // (serde-rs/serde#2878); without `default` a request
             // that simply omits the field fails to deserialize.
-            if is_option_wrapped {
+            if is_option_wrapped && !is_required {
                 attrs.push(quote! { default });
             }
         } else if is_tri_state {
             attrs.push(quote! { default });
             attrs.push(quote! { deserialize_with = "tri_state_serde::deserialize" });
+        } else if is_required && self.property_is_nullable(schema_name, field_name, prop) {
+            // A custom deserializer prevents Serde's implicit missing Option
+            // fallback, while still accepting an explicitly supplied JSON null.
+            attrs.push(quote! { deserialize_with = "serde::Deserialize::deserialize" });
         }
 
         if attrs.is_empty() {
