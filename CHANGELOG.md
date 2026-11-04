@@ -6,8 +6,22 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- Generated HTTP clients accept an application-owned
+  `reqwest_middleware::ClientWithMiddleware` through `with_middleware`.
+  This constructor preserves the supplied connection pool and middleware stack
+  without adding generated retry or tracing middleware.
+
 ### Fixed
 
+- Models that contain `writeOnly` properties, including through references or
+  composition, redact their `Debug` output without changing serialization.
+- Explicitly closed standalone objects now reject unknown fields, like closed
+  union branches. Objects that omit `additionalProperties` remain tolerant.
+- Required nullable properties accept explicit null but reject a missing member.
+  This also applies when the property uses a format-specific Serde codec;
+  optional nullable properties retain their missing/null/value distinction.
 - Publish documentation at all six generated Axum Problem Details type URIs
   so existing validation error links resolve (#109). Website builds now check
   that every emitted problem URI has a page. Document response middleware for

@@ -464,7 +464,7 @@ impl CodeGenerator {
             }
         };
 
-        if has_retry || has_tracing {
+        let constructors = if has_retry || has_tracing {
             let retry_arg = has_retry.then(|| quote! { retry_config, });
             let tracing_arg = has_tracing.then(|| quote! { enable_tracing, });
             let default_retry_arg = has_retry.then(|| quote! { None, });
@@ -498,14 +498,7 @@ impl CodeGenerator {
                     #retry_middleware
 
                     let http_client = client_builder.build();
-
-                    Self {
-                        base_url: #default_base_url,
-                        api_key: None,
-                        http_client,
-                        custom_headers: BTreeMap::new(),
-                        max_response_body_bytes: #max_response_body_bytes,
-                    }
+                    Self::with_middleware(http_client)
                 }
             }
         } else {
@@ -517,15 +510,23 @@ impl CodeGenerator {
                 /// Preserves the supplied client's transport settings (for example,
                 /// TLS identity, trusted roots, proxy, timeout, and default headers).
                 pub fn with_client(client: reqwest::Client) -> Self {
-                    let http_client = ClientBuilder::new(client).build();
+                    Self::with_middleware(ClientBuilder::new(client).build())
+                }
+            }
+        };
 
-                    Self {
-                        base_url: #default_base_url,
-                        api_key: None,
-                        http_client,
-                        custom_headers: BTreeMap::new(),
-                        max_response_body_bytes: #max_response_body_bytes,
-                    }
+        quote! {
+            #constructors
+
+            /// Use an application-owned middleware stack without adding retries
+            /// or tracing. The supplied transport retains its connection pool.
+            pub fn with_middleware(http_client: ClientWithMiddleware) -> Self {
+                Self {
+                    base_url: #default_base_url,
+                    api_key: None,
+                    http_client,
+                    custom_headers: BTreeMap::new(),
+                    max_response_body_bytes: #max_response_body_bytes,
                 }
             }
         }
@@ -667,6 +668,53 @@ impl CodeGenerator {
             .collect();
         let (operation_builders, builder_entries) =
             self.generate_operation_builders(analysis, &plans);
+        let builder_runtime = (!operation_builders.is_empty()).then(|| {
+            quote! {
+                /// Result-policy integration for owned generated requests.
+                pub mod operation_policy {
+                use super::{ApiOpError, HttpClient};
+
+                /// An owned operation client and its result policy.
+                ///
+                /// Implementations can retain request-local admission and response
+                /// ownership until the generated decoder has completed or is dropped.
+                pub trait OperationClient<E: std::fmt::Debug> {
+                    type Error;
+
+                    fn client(&self) -> &HttpClient;
+
+                    fn finish<T>(self, result: Result<T, ApiOpError<E>>) -> Result<T, Self::Error>;
+                }
+
+                impl<E: std::fmt::Debug> OperationClient<E> for &HttpClient {
+                    type Error = ApiOpError<E>;
+
+                    fn client(&self) -> &HttpClient {
+                        self
+                    }
+
+                    fn finish<T>(self, result: Result<T, ApiOpError<E>>) -> Result<T, Self::Error> {
+                        result
+                    }
+                }
+
+                /// Start one named request with an owned result policy.
+                ///
+                /// Each entry consumes this value. Sending or dropping its builder
+                /// also consumes or drops the policy; it cannot be reused for retries.
+                #[must_use]
+                pub struct Operations<C> {
+                    pub(super) client: C,
+                }
+
+                impl<C> Operations<C> {
+                    pub fn new(client: C) -> Self {
+                        Self { client }
+                    }
+                }
+                }
+            }
+        });
 
         quote! {
             #reserved_path_encoder
@@ -676,6 +724,8 @@ impl CodeGenerator {
             #(#op_error_enums)*
 
             #request_content_type_helper
+
+            #builder_runtime
 
             #(#operation_builders)*
 
@@ -697,6 +747,7 @@ impl CodeGenerator {
             "with_config",
             "with_client",
             "with_client_and_config",
+            "with_middleware",
             "with_base_url",
             "with_api_key",
             "with_max_response_body_bytes",
@@ -1100,7 +1151,8 @@ impl CodeGenerator {
         builder_ident: &syn::Ident,
         plan: &ClientMethodPlan<'_>,
     ) -> (TokenStream, TokenStream) {
-        let mut fields = vec![quote! { client: &'a HttpClient }];
+        let mut fields = vec![quote! { client: C }];
+        let lifetime_field = self.request_content_type_ident(operation, "__operation_lifetime");
         let mut entry_parameters = Vec::new();
         let mut initializers = vec![quote! { client: self }];
         let mut call_arguments = Vec::new();
@@ -1115,7 +1167,6 @@ impl CodeGenerator {
             used_methods.insert("content_type".to_string());
             setters.push(quote! {
                 /// Set a concrete request Content-Type matching a declared media range.
-                #[must_use]
                 pub fn content_type(mut self, value: impl Into<String>) -> Self {
                     self.#ident = Some(value.into());
                     self
@@ -1157,7 +1208,6 @@ impl CodeGenerator {
                 };
                 setters.push(quote! {
                     #[doc = concat!("Set the optional `", #wire_name, "` operation parameter.")]
-                    #[must_use]
                     pub fn #setter_ident(mut self, #field_ident: #setter_type) -> Self {
                         #assignment
                         self
@@ -1219,7 +1269,6 @@ impl CodeGenerator {
             };
             setters.push(quote! {
                 /// Replace the complete request body.
-                #[must_use]
                 pub fn #body_setter(mut self, #body_ident: #body_type) -> Self {
                     #body_assignment
                     self
@@ -1266,7 +1315,6 @@ impl CodeGenerator {
                     };
                     setters.push(quote! {
                         #[doc = concat!("Set the optional request-body field `", #wire_name, "`.")]
-                        #[must_use]
                         pub fn #setter_ident(mut self, #value_ident: #value_type) -> Self {
                             #assignment
                             self
@@ -1316,14 +1364,12 @@ impl CodeGenerator {
                         };
                         setters.push(quote! {
                             #[doc = concat!("Set the optional nullable request-body field `", #wire_name, "` to JSON null.")]
-                            #[must_use]
                             pub fn #null_ident(mut self) -> Self {
                                 #null_assignment
                                 self
                             }
 
                             #[doc = concat!("Omit the optional nullable request-body field `", #wire_name, "`.")]
-                            #[must_use]
                             pub fn #absent_ident(mut self) -> Self {
                                 #absent_assignment
                                 self
@@ -1352,12 +1398,12 @@ impl CodeGenerator {
                 };
             quote! {
                 match self.#field {
-                    Some(content_type) => self.client.#companion(#(#call_arguments,)* &content_type).await #with_type,
-                    None => self.client.#flat_method(#(#call_arguments),*).await #without_type,
+                    Some(content_type) => self.client.client().#companion(#(#call_arguments,)* &content_type).await #with_type,
+                    None => self.client.client().#flat_method(#(#call_arguments),*).await #without_type,
                 }
             }
         } else {
-            quote! { self.client.#flat_method(#(#call_arguments),*).await }
+            quote! { self.client.client().#flat_method(#(#call_arguments),*).await }
         };
         // The entry point is deprecated with its operation. `send` calls the
         // deprecated method on the caller's behalf, who was warned at the entry.
@@ -1370,17 +1416,36 @@ impl CodeGenerator {
         let definition = quote! {
             #[doc = concat!("Additive request builder for `", #operation_id, "`.")]
             #[must_use]
-            pub struct #builder_ident<'a> {
+            pub struct #builder_ident<'a, C = &'a HttpClient> {
                 #(#fields,)*
+                #lifetime_field: std::marker::PhantomData<&'a ()>,
             }
 
-            impl<'a> #builder_ident<'a> {
+            impl<'a, C> #builder_ident<'a, C> {
                 #(#setters)*
 
-                /// Send the request through the existing flat operation method.
+                /// Send once and complete the owning client's result policy.
                 #allow_deprecated
-                pub async fn send(self) -> Result<#response_type, ApiOpError<#error_type>> {
-                    #send
+                pub async fn send(self) -> Result<#response_type, C::Error>
+                where
+                    C: operation_policy::OperationClient<#error_type>,
+                {
+                    let result = { #send };
+                    self.client.finish(result)
+                }
+            }
+        };
+        let owned_initializers = initializers.iter().skip(1);
+        let owned_entry = quote! {
+            impl<C> operation_policy::Operations<C> {
+                #[doc = concat!("Start `", #operation_id, "` with named optional parameters.")]
+                #deprecated
+                pub fn #flat_method(self, #(#entry_parameters),*) -> #builder_ident<'static, C> {
+                    #builder_ident {
+                        client: self.client,
+                        #(#owned_initializers,)*
+                        #lifetime_field: std::marker::PhantomData,
+                    }
                 }
             }
         };
@@ -1393,10 +1458,11 @@ impl CodeGenerator {
             ) -> #builder_ident<'_> {
                 #builder_ident {
                     #(#initializers,)*
+                    #lifetime_field: std::marker::PhantomData,
                 }
             }
         };
-        (definition, entry)
+        (quote! { #definition #owned_entry }, entry)
     }
 
     fn allocate_name(base: &str, used: &mut std::collections::HashSet<String>) -> String {
@@ -1910,7 +1976,8 @@ impl CodeGenerator {
 
         Some(quote! {
             #[doc = #doc]
-            #[derive(Debug, Clone)]
+            #[derive(Debug, Clone, serde::Serialize)]
+            #[serde(untagged)]
             pub enum #enum_ident {
                 #(#variant_decls,)*
             }

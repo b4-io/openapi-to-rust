@@ -207,6 +207,36 @@ fn test_generated_client_emits_per_op_error_enum() {
         client_code.contains("Status400(BadRequest)"),
         "Expected Status400(BadRequest) variant. Code:\n{client_code}"
     );
+    // Error forwarding must retain the wire body, not a Status400 wrapper.
+    let file = syn::parse_file(&client_code).expect("generated client AST");
+    let error = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "ListTodosApiError" => Some(item),
+            _ => None,
+        })
+        .expect("operation error enum");
+    assert!(error.attrs.iter().any(|attr| {
+        attr.path().is_ident("serde")
+            && attr
+                .parse_args::<syn::Ident>()
+                .is_ok_and(|value| value == "untagged")
+    }));
+    assert!(error.attrs.iter().any(|attr| {
+        attr.path().is_ident("derive")
+            && attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                )
+                .is_ok_and(|paths| {
+                    paths.iter().any(|path| {
+                        path.segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == "Serialize")
+                    })
+                })
+    }));
 
     // The signature should plug the per-op error type into ApiOpError.
     assert!(

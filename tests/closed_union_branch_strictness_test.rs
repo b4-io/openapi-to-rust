@@ -4,10 +4,8 @@
 //! whose fields are all optional matches *any* object, wins the branch, and
 //! drops the keys — `{"free": "shape"}` came back as `{}`.
 //!
-//! The negatives are the whole design. An omitted `additionalProperties`
-//! leaves the object open in JSON Schema, and a closed struct outside any
-//! union has no branch to lose, so neither is tightened: strict parsing there
-//! would only make generated clients fail when a server adds a field.
+//! An omitted `additionalProperties` leaves the object open in JSON Schema.
+//! An explicit false closes the object, whether or not it is a union branch.
 
 use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::{Value, json};
@@ -31,8 +29,7 @@ fn spec() -> Value {
                 "type": "object",
                 "properties": { "name": { "type": "string" } }
             },
-            // Closed, but never a union branch: nothing to lose, stays
-            // tolerant so an added server field does not break the client.
+            // Explicitly closed even though it is never a union branch.
             "ClosedStandalone": {
                 "type": "object", "additionalProperties": false,
                 "properties": { "id": { "type": "string" } }
@@ -70,9 +67,9 @@ fn generate(output_dir: std::path::PathBuf) -> String {
     .expect("generate closed branch models")
 }
 
-/// The attribute lands on exactly one of the three structs.
+/// Only explicitly closed objects receive the strict Serde attribute.
 #[test]
-fn only_a_stated_closed_union_branch_denies_unknown_fields() {
+fn every_explicitly_closed_object_denies_unknown_fields() {
     let temp = tempfile::TempDir::new().expect("temporary output directory");
     let generated = generate(temp.path().join("generated"));
 
@@ -99,9 +96,8 @@ fn only_a_stated_closed_union_branch_denies_unknown_fields() {
          Schema and must stay tolerant:\n{generated}"
     );
     assert!(
-        !denied("ClosedStandalone"),
-        "a closed struct outside any union has no branch to lose and must stay \
-         tolerant:\n{generated}"
+        denied("ClosedStandalone"),
+        "an explicit closed-object contract also applies outside unions:\n{generated}"
     );
     assert!(
         !denied("Holder"),
@@ -189,11 +185,10 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_standalone_struct_still_tolerates_a_new_server_field() {
-        let hydrated: generated::ClosedStandalone =
-            serde_json::from_value(json!({"id": "x", "addedLater": true}))
-                .expect("a closed struct outside a union must not hard-fail");
-        assert_eq!(hydrated.id.as_deref(), Some("x"));
+    fn a_closed_standalone_struct_rejects_a_forbidden_server_field() {
+        let hydrated: Result<generated::ClosedStandalone, _> =
+            serde_json::from_value(json!({"id": "x", "addedLater": true}));
+        assert!(hydrated.is_err());
     }
 }
 "#,

@@ -4,8 +4,9 @@ use serde_json::json;
 use std::process::Command;
 
 #[test]
-fn custom_client_preserves_transport_and_constructor_compatibility() {
-    let temp = tempfile::TempDir::new().unwrap();
+fn custom_client_preserves_transport_and_constructor_compatibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::TempDir::new()?;
     let spec = json!({
         "openapi": "3.1.0", "info": {"title": "custom client", "version": "1"},
         "paths": {
@@ -19,7 +20,8 @@ fn custom_client_preserves_transport_and_constructor_compatibility() {
                 }}
             }}},
             "/collision": {"get": {"operationId": "withClient", "responses": {"204": {"description": "ok"}}}},
-            "/config-collision": {"get": {"operationId": "withClientAndConfig", "responses": {"204": {"description": "ok"}}}}
+            "/config-collision": {"get": {"operationId": "withClientAndConfig", "responses": {"204": {"description": "ok"}}}},
+            "/middleware-collision": {"get": {"operationId": "withMiddleware", "responses": {"204": {"description": "ok"}}}}
         }
     });
     let mut modules = String::new();
@@ -31,10 +33,7 @@ fn custom_client_preserves_transport_and_constructor_compatibility() {
         ("trace_only", false, true, "false"),
         ("both", true, true, "None, false"),
     ] {
-        let mut analysis = SchemaAnalyzer::new(spec.clone())
-            .unwrap()
-            .analyze()
-            .unwrap();
+        let mut analysis = SchemaAnalyzer::new(spec.clone())?.analyze()?;
         let generator = CodeGenerator::new(GeneratorConfig {
             output_dir: temp.path().join("src").join(name),
             enable_async_client: true,
@@ -53,17 +52,17 @@ fn custom_client_preserves_transport_and_constructor_compatibility() {
             }),
             ..Default::default()
         });
-        let result = generator.generate_all(&mut analysis).unwrap();
-        generator.write_files(&result).unwrap();
+        let result = generator.generate_all(&mut analysis)?;
+        generator.write_files(&result)?;
         let client = result
             .files
             .iter()
             .find(|file| file.path.to_str() == Some("client.rs"))
-            .unwrap();
+            .ok_or("generated client is missing")?;
         assert!(client.content.contains("http://configured.invalid"));
         if name == "both" {
             dependencies =
-                std::fs::read_to_string(temp.path().join("src/both/REQUIRED_DEPS.toml")).unwrap();
+                std::fs::read_to_string(temp.path().join("src/both/REQUIRED_DEPS.toml"))?;
         }
         modules.push_str(&format!("mod {name};\n"));
         let explicit = if retry || tracing {
@@ -77,7 +76,7 @@ fn custom_client_preserves_transport_and_constructor_compatibility() {
             let _ = HttpClient::new();
             let _ = HttpClient::default();
             let supplied = HttpClient::with_client(transport.clone());
-            for client in [supplied, {explicit}] {{
+            for client in [supplied, {explicit}, HttpClient::with_middleware(middleware.clone())] {{
                 let client = client.with_base_url(&base_url);
                 assert_eq!(client.text().await.unwrap(), "custom");
                 let mut events = client.events_sse().await.unwrap();
@@ -87,6 +86,7 @@ fn custom_client_preserves_transport_and_constructor_compatibility() {
                     Err({name}::client::ApiOpError::Transport({name}::client::HttpError::ResponseTooLarge {{ limit: 32 }}))));
                 client.with_client_2().await.unwrap();
                 client.with_client_and_config_2().await.unwrap();
+                client.with_middleware_2().await.unwrap();
             }}
         }}
         "#));
@@ -126,12 +126,15 @@ publish = false
 {dependencies}
 [dev-dependencies]
 axum = "0.8"
+async-trait = "0.1"
 tokio = {{ version = "1", features = ["macros", "net", "rt-multi-thread"] }}
 "#
         ),
-    )
-    .unwrap();
-    std::fs::write(temp.path().join("src/lib.rs"), format!(r#"
+    )?;
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        format!(
+            r#"
 #![allow(dead_code)]
 {modules}
 #[cfg(test)]
@@ -139,6 +142,23 @@ mod tests {{
     use super::*;
     use axum::{{Router, routing::get, http::{{HeaderMap, StatusCode}}}};
     use futures_util::StreamExt;
+
+    struct Policy(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl reqwest_middleware::Middleware for Policy {{
+        async fn handle(
+            &self,
+            mut request: reqwest::Request,
+            extensions: &mut axum::http::Extensions,
+            next: reqwest_middleware::Next<'_>,
+        ) -> reqwest_middleware::Result<reqwest::Response> {{
+            request.headers_mut().insert("x-transport", "custom".parse().unwrap());
+            let response = next.run(request, extensions).await?;
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(response)
+        }}
+    }}
 
     async fn text(headers: HeaderMap) -> (StatusCode, &'static str) {{
         if headers.get("x-transport").and_then(|h| h.to_str().ok()) == Some("custom") {{
@@ -166,18 +186,26 @@ mod tests {{
             }}))
             .route("/large/text", get(|| async {{ "x".repeat(64) }}))
             .route("/collision", get(|| async {{ StatusCode::NO_CONTENT }}))
-            .route("/config-collision", get(|| async {{ StatusCode::NO_CONTENT }}));
+            .route("/config-collision", get(|| async {{ StatusCode::NO_CONTENT }}))
+            .route("/middleware-collision", get(|| async {{ StatusCode::NO_CONTENT }}));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{{}}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {{ axum::serve(listener, app).await.unwrap() }});
         let mut headers = HeaderMap::new();
         headers.insert("x-transport", "custom".parse().unwrap());
         let transport = reqwest::Client::builder().default_headers(headers).https_only(false).no_proxy().build().unwrap();
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let middleware = reqwest_middleware::ClientBuilder::new(
+            reqwest::Client::builder().no_proxy().build().unwrap()
+        ).with(Policy(observed.clone())).build();
         {checks}
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst) > 0);
         server.abort();
     }}
 }}
-"#)).unwrap();
+"#
+        ),
+    )?;
     let output = Command::new("cargo")
         .args(["test", "--quiet"])
         .current_dir(temp.path())
@@ -195,12 +223,12 @@ mod tests {{
         .env_remove("CXX_aarch64_apple_darwin")
         .env("CC", "cc")
         .env("CXX", "c++")
-        .output()
-        .unwrap();
+        .output()?;
     assert!(
         output.status.success(),
         "generated client failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
 }

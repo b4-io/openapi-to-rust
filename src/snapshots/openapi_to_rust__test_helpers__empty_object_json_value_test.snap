@@ -13,5 +13,6 @@ expression: "&generated_code"
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InputSchema {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub properties: Option<serde_json::Value>,
 }

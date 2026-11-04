@@ -93,9 +93,9 @@ fn nullable_true_branches_remain_real_union_alternatives() {
     let (_, generated) = generate(union_spec(), temp.path().join("generated"));
 
     for expected in [
-        "pub struct AnyRequired {\n    pub value: Option<AnyRequiredValue>,",
+        "pub value: Option<AnyRequiredValue>,",
         "pub value: Option<Option<AnyOptionalObjectValue>>",
-        "pub struct OneRequired {\n    pub value: Option<OneRequiredValue>,",
+        "pub value: Option<OneRequiredValue>,",
         "pub value: Option<Option<OneOptionalObjectValue>>",
     ] {
         assert!(

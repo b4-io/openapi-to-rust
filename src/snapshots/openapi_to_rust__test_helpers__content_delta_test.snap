@@ -66,6 +66,7 @@ impl AsRef<str> for CreateChatCompletionStreamResponseObject {
 pub struct CreateChatCompletionStreamResponseChoicesItem {
     pub delta: ChatCompletionStreamResponseDelta,
     ///The reason the model stopped generating tokens
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub finish_reason: Option<CreateChatCompletionStreamResponseChoicesItemFinishReason>,
     ///The index of the choice in the list of choices
     pub index: i64,
@@ -80,7 +81,9 @@ pub struct CreateChatCompletionStreamResponseChoicesItem {
 ///Log probability information for the choice
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateChatCompletionStreamResponseChoicesItemLogprobs {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub content: Option<Vec<ChatCompletionTokenLogprob>>,
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub refusal: Option<Vec<ChatCompletionTokenLogprob>>,
 }
 ///The reason the model stopped generating tokens
@@ -121,6 +124,7 @@ impl AsRef<str> for CreateChatCompletionStreamResponseChoicesItemFinishReason {
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionTokenLogprob {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub bytes: Option<Vec<i64>>,
     pub logprob: f64,
     pub token: String,

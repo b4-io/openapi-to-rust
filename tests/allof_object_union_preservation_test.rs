@@ -437,7 +437,8 @@ fn generated_allof_objects_round_trip_union_fields_and_required_nulls_exactly() 
         .expect("Signer end");
     let signer = &code[signer_start..signer_end];
     assert!(
-        signer.starts_with("pub struct Signer {\n    pub email: Option<String>,"),
+        signer.contains("pub email: Option<String>,")
+            && signer.contains("deserialize_with = \"serde::Deserialize::deserialize\""),
         "required nullable email must serialize explicit null: {signer}"
     );
 
