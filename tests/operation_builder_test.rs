@@ -200,11 +200,9 @@ fn mixed_body_builder_is_additive_and_collision_safe() {
 
     assert!(compact.contains("pubasyncfnupdate_widget("));
     assert!(compact.contains("pubfnupdate_widget_builder("));
-    assert!(compact.contains("pubstructUpdateWidgetBuilder<'a>"));
-    assert!(
-        compact.contains("pubasyncfnsend(self)->Result<Widget,ApiOpError<UpdateWidgetApiError>>")
-    );
-    assert!(compact.contains("self.client.update_widget("));
+    assert!(compact.contains("pubstructUpdateWidgetBuilder<'a,C=&'aHttpClient>"));
+    assert!(compact.contains("pubasyncfnsend(self)->Result<Widget,C::Error>"));
+    assert!(compact.contains("self.client.client().update_widget("));
     assert!(compact.contains("pubfnsearch(mutself,search:implInto<String>)->Self"));
     assert!(compact.contains("pubfnlimit(mutself,limit:i32)->Self"));
     assert!(compact.contains("pubfntags(mutself,tags:Vec<String>)->Self"));
@@ -220,7 +218,7 @@ fn mixed_body_builder_is_additive_and_collision_safe() {
     assert!(compact.contains("pubfnconnection_string_2(mutself,connection_string_2:String)->Self"));
     assert!(compact.contains("pubfnpatch_profile_builder(&self)->PatchProfileBuilder<'_>"));
     assert!(compact.contains("pubfnsave_draft_builder(&self)->SaveDraftBuilder<'_>"));
-    assert!(compact.contains("pubstructClientBuilder2<'a>"));
+    assert!(compact.contains("pubstructClientBuilder2<'a,C=&'aHttpClient>"));
     assert!(compact.contains("pubfnclient_builder(&self,client_2:implInto<String>)"));
     assert!(compact.contains("pubfncreate_composed_builder("));
     assert!(compact.contains("self.request.alpha=Some(alpha)"));
@@ -316,6 +314,29 @@ pub async fn composed_call_compiles(client: &generated::HttpClient) {
         .delta("path".to_string())
         .send()
         .await;
+}
+
+pub struct Guard<'a>(&'a generated::HttpClient);
+
+impl<E: std::fmt::Debug> generated::operation_policy::OperationClient<E> for Guard<'_> {
+    type Error = ();
+
+    fn client(&self) -> &generated::HttpClient {
+        self.0
+    }
+
+    fn finish<T>(self, result: Result<T, generated::ApiOpError<E>>) -> Result<T, ()> {
+        result.map_err(|_| ())
+    }
+}
+
+pub async fn owned_policy_call_compiles(client: &generated::HttpClient) -> Result<generated::Widget, ()> {
+    generated::operation_policy::Operations::new(Guard(client))
+        .update_widget("widget", "tenant", "owned".to_string())
+        .search("named")
+        .limit(20)
+        .send()
+        .await
 }
 "#,
     )

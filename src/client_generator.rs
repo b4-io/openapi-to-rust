@@ -668,6 +668,53 @@ impl CodeGenerator {
             .collect();
         let (operation_builders, builder_entries) =
             self.generate_operation_builders(analysis, &plans);
+        let builder_runtime = (!operation_builders.is_empty()).then(|| {
+            quote! {
+                /// Result-policy integration for owned generated requests.
+                pub mod operation_policy {
+                use super::{ApiOpError, HttpClient};
+
+                /// An owned operation client and its result policy.
+                ///
+                /// Implementations can retain request-local admission and response
+                /// ownership until the generated decoder has completed or is dropped.
+                pub trait OperationClient<E: std::fmt::Debug> {
+                    type Error;
+
+                    fn client(&self) -> &HttpClient;
+
+                    fn finish<T>(self, result: Result<T, ApiOpError<E>>) -> Result<T, Self::Error>;
+                }
+
+                impl<E: std::fmt::Debug> OperationClient<E> for &HttpClient {
+                    type Error = ApiOpError<E>;
+
+                    fn client(&self) -> &HttpClient {
+                        self
+                    }
+
+                    fn finish<T>(self, result: Result<T, ApiOpError<E>>) -> Result<T, Self::Error> {
+                        result
+                    }
+                }
+
+                /// Start one named request with an owned result policy.
+                ///
+                /// Each entry consumes this value. Sending or dropping its builder
+                /// also consumes or drops the policy; it cannot be reused for retries.
+                #[must_use]
+                pub struct Operations<C> {
+                    pub(super) client: C,
+                }
+
+                impl<C> Operations<C> {
+                    pub fn new(client: C) -> Self {
+                        Self { client }
+                    }
+                }
+                }
+            }
+        });
 
         quote! {
             #reserved_path_encoder
@@ -677,6 +724,8 @@ impl CodeGenerator {
             #(#op_error_enums)*
 
             #request_content_type_helper
+
+            #builder_runtime
 
             #(#operation_builders)*
 
@@ -1102,7 +1151,8 @@ impl CodeGenerator {
         builder_ident: &syn::Ident,
         plan: &ClientMethodPlan<'_>,
     ) -> (TokenStream, TokenStream) {
-        let mut fields = vec![quote! { client: &'a HttpClient }];
+        let mut fields = vec![quote! { client: C }];
+        let lifetime_field = self.request_content_type_ident(operation, "__operation_lifetime");
         let mut entry_parameters = Vec::new();
         let mut initializers = vec![quote! { client: self }];
         let mut call_arguments = Vec::new();
@@ -1354,12 +1404,12 @@ impl CodeGenerator {
                 };
             quote! {
                 match self.#field {
-                    Some(content_type) => self.client.#companion(#(#call_arguments,)* &content_type).await #with_type,
-                    None => self.client.#flat_method(#(#call_arguments),*).await #without_type,
+                    Some(content_type) => self.client.client().#companion(#(#call_arguments,)* &content_type).await #with_type,
+                    None => self.client.client().#flat_method(#(#call_arguments),*).await #without_type,
                 }
             }
         } else {
-            quote! { self.client.#flat_method(#(#call_arguments),*).await }
+            quote! { self.client.client().#flat_method(#(#call_arguments),*).await }
         };
         // The entry point is deprecated with its operation. `send` calls the
         // deprecated method on the caller's behalf, who was warned at the entry.
@@ -1372,17 +1422,36 @@ impl CodeGenerator {
         let definition = quote! {
             #[doc = concat!("Additive request builder for `", #operation_id, "`.")]
             #[must_use]
-            pub struct #builder_ident<'a> {
+            pub struct #builder_ident<'a, C = &'a HttpClient> {
                 #(#fields,)*
+                #lifetime_field: std::marker::PhantomData<&'a ()>,
             }
 
-            impl<'a> #builder_ident<'a> {
+            impl<'a, C> #builder_ident<'a, C> {
                 #(#setters)*
 
-                /// Send the request through the existing flat operation method.
+                /// Send once and complete the owning client's result policy.
                 #allow_deprecated
-                pub async fn send(self) -> Result<#response_type, ApiOpError<#error_type>> {
-                    #send
+                pub async fn send(self) -> Result<#response_type, C::Error>
+                where
+                    C: operation_policy::OperationClient<#error_type>,
+                {
+                    let result = { #send };
+                    self.client.finish(result)
+                }
+            }
+        };
+        let owned_initializers = initializers.iter().skip(1);
+        let owned_entry = quote! {
+            impl<C> operation_policy::Operations<C> {
+                #[doc = concat!("Start `", #operation_id, "` with named optional parameters.")]
+                #deprecated
+                pub fn #flat_method(self, #(#entry_parameters),*) -> #builder_ident<'static, C> {
+                    #builder_ident {
+                        client: self.client,
+                        #(#owned_initializers,)*
+                        #lifetime_field: std::marker::PhantomData,
+                    }
                 }
             }
         };
@@ -1395,10 +1464,11 @@ impl CodeGenerator {
             ) -> #builder_ident<'_> {
                 #builder_ident {
                     #(#initializers,)*
+                    #lifetime_field: std::marker::PhantomData,
                 }
             }
         };
-        (definition, entry)
+        (quote! { #definition #owned_entry }, entry)
     }
 
     fn allocate_name(base: &str, used: &mut std::collections::HashSet<String>) -> String {

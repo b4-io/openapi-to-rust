@@ -822,6 +822,16 @@ handling as the flat operation method. For wildcard request bodies, add
 [above](#wildcard-request-bodies). Existing flat async methods remain available.
 Builder generation is disabled by default.
 
+Generated builders can also own a request-local policy. Implement the generated
+`operation_policy::OperationClient<E>` trait for your guard, then use
+`operation_policy::Operations::new(guard).update_widget(...).search("needle").send().await`.
+The builder calls the same flat operation, then passes its result to the guard's
+`finish` method. Dropping the builder or its send future drops the guard too.
+This lets an application retain admission permits, response ownership, and safe
+error conversion without writing a wrapper for each endpoint. The existing
+`client.update_widget_builder(...)` form keeps its original raw SDK error type.
+Builder availability still follows the configured optional-value threshold.
+
 When using the Rust library:
 
 ```rust
