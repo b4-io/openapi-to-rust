@@ -1912,7 +1912,8 @@ impl CodeGenerator {
 
         Some(quote! {
             #[doc = #doc]
-            #[derive(Debug, Clone)]
+            #[derive(Debug, Clone, serde::Serialize)]
+            #[serde(untagged)]
             pub enum #enum_ident {
                 #(#variant_decls,)*
             }
