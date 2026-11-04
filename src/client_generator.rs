@@ -1167,7 +1167,6 @@ impl CodeGenerator {
             used_methods.insert("content_type".to_string());
             setters.push(quote! {
                 /// Set a concrete request Content-Type matching a declared media range.
-                #[must_use]
                 pub fn content_type(mut self, value: impl Into<String>) -> Self {
                     self.#ident = Some(value.into());
                     self
@@ -1209,7 +1208,6 @@ impl CodeGenerator {
                 };
                 setters.push(quote! {
                     #[doc = concat!("Set the optional `", #wire_name, "` operation parameter.")]
-                    #[must_use]
                     pub fn #setter_ident(mut self, #field_ident: #setter_type) -> Self {
                         #assignment
                         self
@@ -1271,7 +1269,6 @@ impl CodeGenerator {
             };
             setters.push(quote! {
                 /// Replace the complete request body.
-                #[must_use]
                 pub fn #body_setter(mut self, #body_ident: #body_type) -> Self {
                     #body_assignment
                     self
@@ -1318,7 +1315,6 @@ impl CodeGenerator {
                     };
                     setters.push(quote! {
                         #[doc = concat!("Set the optional request-body field `", #wire_name, "`.")]
-                        #[must_use]
                         pub fn #setter_ident(mut self, #value_ident: #value_type) -> Self {
                             #assignment
                             self
@@ -1368,14 +1364,12 @@ impl CodeGenerator {
                         };
                         setters.push(quote! {
                             #[doc = concat!("Set the optional nullable request-body field `", #wire_name, "` to JSON null.")]
-                            #[must_use]
                             pub fn #null_ident(mut self) -> Self {
                                 #null_assignment
                                 self
                             }
 
                             #[doc = concat!("Omit the optional nullable request-body field `", #wire_name, "`.")]
-                            #[must_use]
                             pub fn #absent_ident(mut self) -> Self {
                                 #absent_assignment
                                 self
