@@ -135,6 +135,10 @@ fn binary_default_emits_bytes_bytes() {
         code.contains("pub value: bytes::Bytes"),
         "binary should map to bytes::Bytes by default. Code:\n{code}"
     );
+    assert!(
+        code.contains("pub mod binary_bytes_serde"),
+        "scalar-alias consumers must be able to reuse the generated JSON codec"
+    );
 }
 
 fn binary_model_round_trip_spec() -> serde_json::Value {

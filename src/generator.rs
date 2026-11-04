@@ -957,8 +957,9 @@ impl CodeGenerator {
                 /// base64 codec for `Vec<u8>` fields produced from
                 /// `format: byte`. Used via `#[serde(with = "base64_serde")]`
                 /// for required/non-null fields; `with = "base64_serde::option"`
-                /// for the Option<Vec<u8>> case.
-                mod base64_serde {
+                /// for the Option<Vec<u8>> case. Public so consumers can reuse
+                /// the wire codec on wrappers around generated scalar aliases.
+                pub mod base64_serde {
                     use base64::{Engine as _, engine::general_purpose::#engine as ENGINE};
                     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -1051,7 +1052,8 @@ impl CodeGenerator {
                 /// UTF-8 JSON string codec for `bytes::Bytes` model fields
                 /// produced from `format: binary`. Raw HTTP body and multipart
                 /// paths use their byte carriers directly and do not invoke it.
-                mod binary_bytes_serde {
+                /// Public so scalar-alias wrappers can retain the same JSON codec.
+                pub mod binary_bytes_serde {
                     use serde::{Deserialize, Deserializer, Serializer};
 
                     pub fn serialize<S: Serializer>(
@@ -1132,7 +1134,7 @@ impl CodeGenerator {
             quote! {
                 /// UTF-8 JSON string codec for `Vec<u8>` model fields produced
                 /// from `format: binary` under the vec_u8 strategy.
-                mod binary_vec_serde {
+                pub mod binary_vec_serde {
                     use serde::{Deserialize, Deserializer, Serializer};
 
                     pub fn serialize<S: Serializer>(
@@ -2888,6 +2890,11 @@ impl CodeGenerator {
         let shared_variant_serde = if let (Some(variant), Some(variant_field)) =
             (variant, variant_field_ident.as_ref())
         {
+            let variant_initializer = if variant_field == "variant" {
+                quote! { variant, }
+            } else {
+                quote! { #variant_field: variant, }
+            };
             let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.target));
             let helper_name = format_ident!("__{}Base", self.to_rust_type_name(&schema.name));
             let variant_properties = self.union_declared_properties(
@@ -3033,7 +3040,7 @@ impl CodeGenerator {
                         };
                         Ok(Self {
                             #(#result_fields)*
-                            #variant_field: variant,
+                            #variant_initializer
                         })
                     }
                 }
